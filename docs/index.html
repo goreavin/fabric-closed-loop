@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fabric Notebook Closed-Loop Development Process</title>
+<style>
+  /* Karpathy wiki style — clean, readable, single-column */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { font-size: 17px; }
+  body {
+    font-family: Georgia, 'Times New Roman', serif;
+    color: #1a1a1a;
+    background: #fafafa;
+    line-height: 1.7;
+    padding: 2rem 1rem;
+    max-width: 52rem;
+    margin: 0 auto;
+  }
+  h1 { font-size: 2rem; margin: 1.5rem 0 0.5rem; border-bottom: 2px solid #333; padding-bottom: 0.3rem; }
+  h2 { font-size: 1.5rem; margin: 2rem 0 0.5rem; border-bottom: 1px solid #ccc; padding-bottom: 0.2rem; }
+  h3 { font-size: 1.2rem; margin: 1.5rem 0 0.4rem; }
+  h4 { font-size: 1rem; margin: 1.2rem 0 0.3rem; }
+  p, ul, ol { margin: 0.6rem 0; }
+  ul, ol { padding-left: 1.5rem; }
+  li { margin: 0.2rem 0; }
+  a { color: #1a5f7a; text-decoration: none; border-bottom: 1px solid #b0d4e3; }
+  a:hover { color: #0d3d52; border-bottom-color: #0d3d52; }
+  code {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.88rem;
+    background: #f0f0f0;
+    padding: 0.15rem 0.35rem;
+    border-radius: 3px;
+  }
+  pre {
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 1rem;
+    overflow-x: auto;
+    margin: 0.8rem 0;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; font-size: 0.85rem; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.8rem 0;
+    font-size: 0.92rem;
+  }
+  th, td {
+    border: 1px solid #ddd;
+    padding: 0.45rem 0.7rem;
+    text-align: left;
+  }
+  th { background: #f0f0f0; font-weight: 600; }
+  tr:nth-child(even) { background: #fafafa; }
+  blockquote {
+    border-left: 3px solid #E3120B;
+    padding: 0.5rem 1rem;
+    margin: 0.8rem 0;
+    background: #fff8f8;
+    color: #333;
+  }
+  hr { border: none; border-top: 1px solid #ddd; margin: 2rem 0; }
+  .mermaid {
+    background: #fff;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    padding: 1rem;
+    margin: 1rem 0;
+    text-align: center;
+  }
+  /* TOC styling */
+  nav { background: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 4px; padding: 1rem 1.5rem; margin: 1rem 0; }
+  nav ol { padding-left: 1.2rem; }
+  nav li { margin: 0.15rem 0; }
+  /* Print */
+  @media print {
+    body { max-width: none; font-size: 11pt; }
+    pre { white-space: pre-wrap; word-wrap: break-word; }
+    a { color: #000; border-bottom: none; }
+  }
+  @media (max-width: 600px) {
+    html { font-size: 15px; }
+    body { padding: 1rem 0.5rem; }
+  }
+</style>
+</head>
+<body>
+<h1 id="fabric-notebook-closed-loop-development-process">Fabric Notebook
+Closed-Loop Development Process</h1>
+<p>An end-to-end process for authoring, deploying, running, monitoring,
+and correcting PySpark notebooks on Microsoft Fabric — driven entirely
+from a headless agent environment (SageMaker CodeEditor / devcontainer)
+with no portal interaction required.</p>
+<hr />
+<h2 id="table-of-contents">Table of Contents</h2>
+<ol type="1">
+<li><a href="#overview">Overview</a></li>
+<li><a href="#prerequisites--environment-setup">Prerequisites &amp;
+Environment Setup</a></li>
+<li><a href="#authentication">Authentication</a></li>
+<li><a href="#pyspark-kernel-vs-jupyter-kernel-notebooks">PySpark Kernel
+vs Jupyter Kernel Notebooks</a></li>
+<li><a href="#high-level-closed-loop">High-Level Closed Loop</a></li>
+<li><a href="#detailed-sequence-of-tool-interactions">Detailed Sequence
+of Tool Interactions</a></li>
+<li><a href="#tool-decision-matrix">Tool Decision Matrix</a></li>
+<li><a href="#phase-by-phase-detail">Phase-by-Phase Detail</a></li>
+<li><a href="#notebook-monitor-nbmon-internals">Notebook Monitor
+(<code>nbmon</code>) Internals</a></li>
+<li><a href="#gotchas--lessons-learned">Gotchas &amp; Lessons
+Learned</a></li>
+<li><a href="#quick-reference-tables">Quick-Reference Tables</a></li>
+</ol>
+<hr />
+<h2 id="overview">Overview</h2>
+<p>The process implements a <strong>closed-loop development
+cycle</strong> where an agent:</p>
+<ol type="1">
+<li><strong>Authors</strong> PySpark notebooks as plain <code>.py</code>
+files with <code># %%</code> cell markers.</li>
+<li><strong>Builds</strong> them into the Fabric <code>.Notebook</code>
+format (cell separators + platform metadata).</li>
+<li><strong>Deploys</strong> to the Fabric workspace via the
+<code>fab</code> CLI.</li>
+<li><strong>Runs</strong> on a HighConcurrency Spark pool for fast
+warm-start execution.</li>
+<li><strong>Monitors</strong> execution and captures errors via the
+Spark Monitoring REST API (<code>nbmon</code>).</li>
+<li><strong>Queries</strong> transformed output tables via a
+zero-cold-start SQL Analytics endpoint.</li>
+<li><strong>Feeds</strong> errors and query results back into the agent,
+which edits the source <code>.py</code> file and loops back to step
+2.</li>
+</ol>
+<p>The loop typically converges in 1–3 iterations. Two auxiliary paths —
+Livy interactive statements and the SQL endpoint MCP tool — let the
+agent inspect intermediate state without a full notebook round-trip.</p>
+<hr />
+<h2 id="prerequisites--environment-setup">Prerequisites &amp;
+Environment Setup</h2>
+<p>The closed loop requires several libraries and tools installed in the
+development environment. Here's what's needed and how to install
+each.</p>
+<h3 id="python-libraries">Python libraries</h3>
+<pre class="bash"><code># MSAL for token acquisition (used by nbmon and SQL endpoint MCP)
+pip install msal
+
+# Fabric SQL endpoint access
+pip install pymssql        # or: pip install pyodbc (if ODBC driver available)
+
+# HTTP requests (used by nbmon for direct API calls)
+pip install requests</code></pre>
+<h3 id="cli-tools">CLI tools</h3>
+<pre class="bash"><code># Fabric CLI — install via pip
+pip install fabric-cli
+# Or download from: https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-overview
+
+# Verify installation
+fab --version
+fab auth login</code></pre>
+<h3 id="mcp-server-for-sql-analytics-endpoint">MCP server for SQL
+Analytics endpoint</h3>
+<p>The SQL endpoint MCP server is a <a
+href="https://github.com/jlowin/fastmcp">FastMCP</a> stdio server that
+provides two tools:</p>
+<ul>
+<li><code>run_sql(sql, lakehouse, workspace)</code> — execute read-only
+T-SQL</li>
+<li><code>list_lakehouses(workspace)</code> — discover available
+lakehouses</li>
+</ul>
+<p>It requires <code>msal</code>, <code>pymssql</code>, and
+<code>fastmcp</code>. Register it in your agent's MCP configuration to
+make the tools available.</p>
+<h3 id="environment-persistence">Environment persistence</h3>
+<p>In ephemeral environments (SageMaker, Codespaces), installations are
+lost on restart. Use a bootstrap script that restores:</p>
+<ul>
+<li>Python libraries (via <code>.pth</code> wiring or
+<code>pip install --target</code>)</li>
+<li>npm globals (agent tooling, MCP servers)</li>
+<li>CLI wrappers</li>
+<li>Daemon processes (token refresh, keepalive)</li>
+</ul>
+<hr />
+<h2 id="authentication">Authentication</h2>
+<p>All tools in the closed loop share a common MSAL token cache. A
+single <code>fab auth login</code> provisions tokens for every
+downstream tool.</p>
+<h3 id="token-flow">Token flow</h3>
+<pre><code>fab auth login
+  └─► MSAL device-code flow (interactive, one-time)
+      └─► Tokens cached in ~/.config/fab/cache.bin (SerializableTokenCache)
+          ├─► fab CLI        — reads token for Fabric REST API
+          ├─► nbmon          — reads same token for Spark Monitoring REST API
+          ├─► Livy sessions  — reads same token for Livy API calls via fab api
+          └─► SQL endpoint   — separate MSAL flow for SQL Analytics</code></pre>
+<h3 id="per-tool-authentication-details">Per-tool authentication
+details</h3>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Auth method</th>
+<th>Details</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><a
+href="https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-overview"><code>fab</code>
+CLI</a></strong></td>
+<td><a
+href="https://learn.microsoft.com/entra/msal/python/getting-started/device-code-flow">MSAL
+device-code</a> via <code>fab auth login</code></td>
+<td>Tokens cached in <code>~/.config/fab/cache.bin</code></td>
+</tr>
+<tr>
+<td><strong><code>nbmon</code></strong></td>
+<td>Reads bearer directly from <code>fab</code>'s MSAL cache</td>
+<td>Same cache file, no separate login</td>
+</tr>
+<tr>
+<td><strong>Livy API</strong> (via <code>fab api</code>)</td>
+<td>Same as <code>fab</code> CLI</td>
+<td>Calls go through <code>fab api</code> wrapper</td>
+</tr>
+<tr>
+<td><strong>SQL Analytics endpoint</strong></td>
+<td>Separate <a
+href="https://learn.microsoft.com/entra/msal/python/getting-started/device-code-flow">MSAL
+device-code flow</a></td>
+<td>Scoped to <code>database.windows.net</code>; separate cache
+file</td>
+</tr>
+</tbody>
+</table>
+<h3 id="key-auth-commands">Key auth commands</h3>
+<pre class="bash"><code># Initial login (interactive — prints a device code URL)
+fab auth login
+
+# Check token status
+fab auth status
+# Should show: Logged In: True, with tokens for Fabric, PowerBI, Storage, Azure
+
+# SQL endpoint auth (separate, one-time)
+# The MCP server triggers a device-code flow on first use;
+# subsequent calls use the cached refresh token silently.</code></pre>
+<h3 id="auth-gotchas">Auth gotchas</h3>
+<ul>
+<li><strong>Livy write limitation</strong>: Livy interactive sessions
+can <strong>read</strong> lakehouse tables, but they <strong>cannot
+write</strong> to them (Delta MERGE, INSERT, saveAsTable). This is why
+we need to run notebooks via <code>fab job start</code> for any code
+that writes to a lakehouse — notebook jobs execute with full storage
+credentials that Livy sessions lack.</li>
+<li><strong>Token expiry</strong>: Tokens expire after ~1 hour. The
+<code>fab</code> CLI auto-refreshes via the cached refresh token. If
+<code>nbmon</code> or Livy calls fail with 401, run
+<code>fab auth status</code> (triggers refresh) and retry.</li>
+<li><strong>Single cache, multiple consumers</strong>: All tools read
+from the same <code>~/.config/fab/cache.bin</code>. Never delete it
+while tools are running.</li>
+</ul>
+<h3 id="references">References</h3>
+<ul>
+<li><a
+href="https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-overview">Fabric
+CLI documentation</a></li>
+<li><a
+href="https://learn.microsoft.com/entra/msal/python/getting-started/device-code-flow">MSAL
+Python — device code flow</a></li>
+<li><a
+href="https://learn.microsoft.com/rest/api/fabric/articles/get-started/fabric-api-quickstart">Fabric
+REST API authentication</a></li>
+</ul>
+<hr />
+<h2 id="pyspark-kernel-vs-jupyter-kernel-notebooks">PySpark Kernel vs
+Jupyter Kernel Notebooks</h2>
+<p>Fabric supports two notebook kernel types. The choice fundamentally
+affects how code runs, what APIs are available, and how the closed loop
+operates.</p>
+<h3 id="pyspark-kernel-synapse_pyspark">PySpark kernel
+(<code>synapse_pyspark</code>)</h3>
+<ul>
+<li><strong>This is what we use.</strong> All notebooks in this process
+target the PySpark kernel.</li>
+<li>Code runs on a <strong>Spark driver</strong> backed by a distributed
+Spark cluster.</li>
+<li>A pre-initialised <code>spark</code> session object
+(<code>SparkSession</code>) is available in every cell.</li>
+<li>DataFrames are <strong>Spark DataFrames</strong> — distributed,
+lazy, and evaluated via Catalyst.</li>
+<li>Native access to Delta Lake tables in Fabric lakehouses
+(<code>spark.table("lakehouse.table")</code>).</li>
+<li>Cell outputs (via <code>print()</code>, <code>display()</code>,
+<code>df.show()</code>) are captured in the <strong>driver
+stdout</strong>.</li>
+<li><code>%%sql</code> magic runs Spark SQL directly.</li>
+<li>Notebook metadata uses
+<code>"language_group": "synapse_pyspark"</code>.</li>
+<li>The <code># META</code> block in each cell specifies
+<code>"language": "python"</code>.</li>
+</ul>
+<h3 id="jupyter-kernel-python--synapse_jupyter">Jupyter kernel (Python /
+<code>synapse_jupyter</code>)</h3>
+<ul>
+<li>Code runs on a <strong>single Python process</strong> (the Jupyter
+kernel), not a Spark cluster.</li>
+<li>No pre-initialised <code>spark</code> object. To use Spark, you must
+create your own <code>SparkSession</code>.</li>
+<li>DataFrames are typically <strong>PyArrow tables</strong> or
+<strong>Polars DataFrames</strong> (preferred over pandas for
+performance). We use Polars where possible for local DataFrame
+work.</li>
+<li>You can initialise cores based on workload and use Python-native
+parallelism (<code>multiprocessing</code>,
+<code>concurrent.futures</code>, Polars' built-in multithreading) to
+parallelise tasks across available CPU cores — useful for CPU-bound
+transforms that don't need distributed Spark.</li>
+<li>Lakehouse and warehouse table access requires explicit
+configuration:
+<ul>
+<li><strong>Lakehouse tables</strong>: Use the SQL Analytics endpoint
+via <code>pymssql</code> / <code>pyodbc</code> with MSAL token auth
+(same mechanism as the MCP <code>run_sql</code> tool).</li>
+<li><strong>Warehouse tables</strong>: Connect via the warehouse's SQL
+connection string using <code>pymssql</code> / <code>pyodbc</code> with
+Azure AD token auth.</li>
+<li><strong>OneLake direct</strong>: Read parquet/Delta files directly
+from <code>abfss://</code> paths using <code>pyarrow.parquet</code> or
+<code>deltalake</code> with appropriate storage credentials.</li>
+</ul></li>
+<li>Useful for lightweight data science work, plotting, or non-Spark
+Python tasks.</li>
+<li>Notebook metadata uses
+<code>"language_group": "synapse_jupyter"</code>.</li>
+</ul>
+<h3 id="why-it-matters-for-the-closed-loop">Why it matters for the
+closed loop</h3>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>PySpark kernel</th>
+<th>Jupyter kernel</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cold start</td>
+<td>~2–3 min (Spark session)</td>
+<td>~10 s</td>
+</tr>
+<tr>
+<td>HighConcurrency pool</td>
+<td>✅ Reuses warm Spark sessions</td>
+<td>❌ Not applicable</td>
+</tr>
+<tr>
+<td>Lakehouse table access</td>
+<td>Native (<code>spark.table(…)</code>)</td>
+<td>Via SQL endpoint / OneLake direct</td>
+</tr>
+<tr>
+<td>Parallelism model</td>
+<td>Distributed Spark executors</td>
+<td>Python multiprocessing / Polars threads</td>
+</tr>
+<tr>
+<td>Driver log via Monitoring API</td>
+<td>✅ Full stdout/stderr</td>
+<td>Limited</td>
+</tr>
+<tr>
+<td><code>nbmon</code> error extraction</td>
+<td>✅ Spark Advise categories</td>
+<td>Python-only tracebacks</td>
+</tr>
+<tr>
+<td>Delta MERGE / write</td>
+<td>Native</td>
+<td>Requires <code>deltalake</code> library</td>
+</tr>
+</tbody>
+</table>
+<p>The entire closed loop — HighConcurrency pool, <code>nbmon</code>
+monitoring, Spark Advise categories, Livy interactive sessions — is
+built around the PySpark kernel.</p>
+<hr />
+<h2 id="high-level-closed-loop">High-Level Closed Loop</h2>
+<pre class="mermaid"><code>---
+config:
+  theme: base
+  fontFamily: &quot;Georgia, serif&quot;
+  themeVariables:
+    primaryColor: &quot;#B0BEC5&quot;
+    primaryTextColor: &quot;#121212&quot;
+    primaryBorderColor: &quot;#455A64&quot;
+    lineColor: &quot;#455A64&quot;
+    secondaryColor: &quot;#ECEFF1&quot;
+    secondaryBorderColor: &quot;#455A64&quot;
+    tertiaryColor: &quot;#FFFFFF&quot;
+    tertiaryBorderColor: &quot;#455A64&quot;
+---
+flowchart TD
+    classDef critical fill:#E3120B,color:#FFFFFF,stroke:#121212,stroke-width:2px
+
+    A[&quot;1 · Author .py notebook locally&quot;] --&gt; B[&quot;2 · Build Fabric .Notebook format&quot;]
+    B --&gt; C[&quot;3 · Deploy via fab import&quot;]
+    C --&gt; D[&quot;4 · Run on HighConcurrency pool&quot;]
+    D --&gt; E{&quot;5 · Monitor with nbmon&quot;}
+    E --&gt;|Succeeded| F[&quot;6 · Query results via SQL endpoint&quot;]
+    E --&gt;|Failed| G[&quot;Read traceback + Spark Advise&quot;]:::critical
+    F --&gt; H{&quot;Results correct?&quot;}
+    H --&gt;|Yes| I([&quot;Done&quot;])
+    H --&gt;|No| G
+    G --&gt; J[&quot;7 · Agent edits source .py&quot;]
+    J --&gt; B</code></pre>
+<hr />
+<h2 id="detailed-sequence-of-tool-interactions">Detailed Sequence of
+Tool Interactions</h2>
+<pre class="mermaid"><code>---
+config:
+  theme: base
+  fontFamily: &quot;Georgia, serif&quot;
+  themeVariables:
+    primaryColor: &quot;#B0BEC5&quot;
+    primaryTextColor: &quot;#121212&quot;
+    primaryBorderColor: &quot;#455A64&quot;
+    lineColor: &quot;#455A64&quot;
+    secondaryColor: &quot;#ECEFF1&quot;
+    secondaryBorderColor: &quot;#455A64&quot;
+    tertiaryColor: &quot;#FFFFFF&quot;
+    tertiaryBorderColor: &quot;#455A64&quot;
+---
+sequenceDiagram
+    participant Agent
+    participant FS as Local Filesystem
+    participant Build as build_fabric_notebooks.py
+    participant Fab as fab CLI
+    participant API as Fabric REST API
+    participant Pool as HC Spark Pool
+    participant Mon as Spark Monitoring API
+    participant SQL as SQL Analytics Endpoint
+
+    Agent-&gt;&gt;FS: Edit .py source with # %% cells
+    Agent-&gt;&gt;Build: python build_fabric_notebooks.py
+    Build-&gt;&gt;FS: Write .Notebook directory
+    Agent-&gt;&gt;Fab: fab import notebook.Notebook
+    Fab-&gt;&gt;API: Upload notebook item
+    API--&gt;&gt;Fab: OK
+    Agent-&gt;&gt;Fab: fab job start notebook.Notebook -C HC
+    Fab-&gt;&gt;API: POST create job run
+    API-&gt;&gt;Pool: Schedule on warm Spark session
+    API--&gt;&gt;Fab: jobInstanceId
+
+    Note over Agent,Mon: Monitor phase
+
+    Agent-&gt;&gt;Mon: nbmon status notebook.Notebook
+    Mon--&gt;&gt;Agent: State + traceback + Spark Advise
+
+    alt Succeeded
+        Agent-&gt;&gt;SQL: SELECT ... FROM lakehouse.table
+        SQL--&gt;&gt;Agent: Result rows TSV
+        Agent-&gt;&gt;Agent: Validate output correctness
+    end
+
+    alt Failed or bad output
+        Agent-&gt;&gt;FS: Fix source .py
+        Note over Agent,FS: Loop back to Build phase
+    end</code></pre>
+<hr />
+<h2 id="tool-decision-matrix">Tool Decision Matrix</h2>
+<pre class="mermaid"><code>---
+config:
+  theme: base
+  fontFamily: &quot;Georgia, serif&quot;
+  themeVariables:
+    primaryColor: &quot;#B0BEC5&quot;
+    primaryTextColor: &quot;#121212&quot;
+    primaryBorderColor: &quot;#455A64&quot;
+    lineColor: &quot;#455A64&quot;
+    secondaryColor: &quot;#ECEFF1&quot;
+    secondaryBorderColor: &quot;#455A64&quot;
+    tertiaryColor: &quot;#FFFFFF&quot;
+    tertiaryBorderColor: &quot;#455A64&quot;
+---
+flowchart LR
+    classDef critical fill:#E3120B,color:#FFFFFF,stroke:#121212,stroke-width:2px
+
+    Q{&quot;What do you need?&quot;}
+    Q --&gt;|&quot;Value lookups\nschema checks&quot;| SQL[&quot;SQL Analytics Endpoint\nT-SQL via MCP\nless than 1s&quot;]
+    Q --&gt;|&quot;Multi-step DataFrame\ndebugging\nread-only&quot;| LIVY[&quot;Livy HC Session\ninteractive statements\ncannot write to lakehouse&quot;]
+    Q --&gt;|&quot;Full notebook run\nwith lakehouse writes&quot;| FAB[&quot;fab job start\nHighConcurrency pool\nfull storage credentials&quot;]
+    Q --&gt;|&quot;Check run status\nor errors&quot;| MON[&quot;nbmon\nSpark Monitoring API&quot;]:::critical</code></pre>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Tool</th>
+<th>Lakehouse write?</th>
+<th>Latency</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Value lookups, schema checks, <code>INFORMATION_SCHEMA</code></td>
+<td>SQL Analytics endpoint (MCP <code>run_sql</code>)</td>
+<td>❌ Read-only</td>
+<td>&lt; 1 s</td>
+</tr>
+<tr>
+<td>Multi-step Spark DataFrame debugging</td>
+<td>Livy HC session statements</td>
+<td>❌ Read-only</td>
+<td>~0 s warm / ~2 min cold</td>
+</tr>
+<tr>
+<td>Full notebook end-to-end run</td>
+<td><code>fab job start -C HighConcurrency</code></td>
+<td>✅ Full write access</td>
+<td>~3 min cold / ~0 min warm</td>
+</tr>
+<tr>
+<td>Status check on any run</td>
+<td><code>nbmon status</code></td>
+<td>n/a</td>
+<td>&lt; 5 s</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="phase-by-phase-detail">Phase-by-Phase Detail</h2>
+<h3 id="phase-1--author-notebooks-locally">Phase 1 — Author notebooks
+locally</h3>
+<p>Notebooks live as plain Python files with <code># %%</code> cell
+markers:</p>
+<pre><code>notebooks/
+├── nb_01_transform_stage_a.py
+├── nb_02_enrich_and_join.py
+├── nb_03_write_output.py
+└── ...</code></pre>
+<p>Each <code># %%</code> boundary becomes a separate Spark cell after
+build. Markdown cells use <code># %% [markdown]</code> and have lines
+prefixed with <code># </code>.</p>
+<p><strong>Parameter cells</strong> use a
+<code>tags=["parameters"]</code> annotation in the metadata to mark them
+as injectable via <code>-P</code> flags at runtime (see the gotcha in
+Phase 3).</p>
+<h3 id="phase-2--build-fabric-notebook-format">Phase 2 — Build Fabric
+notebook format</h3>
+<p>The build script converts local <code>.py</code> files into the
+Fabric <code>.Notebook</code> directory format:</p>
+<pre class="bash"><code>python bin/build_fabric_notebooks.py</code></pre>
+<p><strong>What the build script does:</strong></p>
+<pre class="python"><code>#!/usr/bin/env python3
+&quot;&quot;&quot;
+Convert `# %%`-cell .py files into Fabric .Notebook directories
+(.platform + notebook-content.py with `# CELL ********************`
+separators) so they can be uploaded via `fab import`.
+&quot;&quot;&quot;
+import json, re, uuid
+from pathlib import Path
+
+# --- Configuration ---
+NOTEBOOKS = [
+    (&quot;nb_01_transform_stage_a.py&quot;,  &quot;My Notebook 01&quot;),
+    (&quot;nb_02_enrich_and_join.py&quot;,    &quot;My Notebook 02&quot;),
+    # ... add entries for each notebook
+]
+
+# Lakehouse attachments — auto-bind on import
+DEFAULT_LAKEHOUSE_ID   = &quot;&lt;lakehouse-guid&gt;&quot;
+DEFAULT_LAKEHOUSE_NAME = &quot;&lt;lakehouse-name&gt;&quot;
+DEFAULT_LAKEHOUSE_WS   = &quot;&lt;workspace-guid&gt;&quot;
+KNOWN_LAKEHOUSES = [
+    {&quot;id&quot;: &quot;&lt;bronze-guid&gt;&quot;, &quot;name&quot;: &quot;Bronze&quot;, &quot;workspace_id&quot;: &quot;&lt;workspace-guid&gt;&quot;},
+    {&quot;id&quot;: &quot;&lt;gold-guid&gt;&quot;,   &quot;name&quot;: &quot;Gold&quot;,   &quot;workspace_id&quot;: &quot;&lt;workspace-guid&gt;&quot;},
+]
+
+# --- Cell format constants ---
+CELL_SEP = &quot;# CELL ********************&quot;
+META_BLOCK = (
+    &quot;# METADATA ********************\n\n&quot;
+    &quot;# META {\n&quot;
+    &#39;# META   &quot;language&quot;: &quot;python&quot;,\n&#39;
+    &#39;# META   &quot;language_group&quot;: &quot;synapse_pyspark&quot;\n&#39;
+    &quot;# META }&quot;
+)
+
+def split_cells(src: str):
+    &quot;&quot;&quot;Yield (kind, body) for each # %% cell.&quot;&quot;&quot;
+    # Split on `# %%` markers; `# %% [markdown]` → markdown cells
+    ...
+
+def render_notebook(src_path: Path, display_name: str) -&gt; str:
+    &quot;&quot;&quot;Produce Fabric notebook-content.py from a # %%-cell .py file.&quot;&quot;&quot;
+    header = _render_header()  # JSON metadata with lakehouse deps
+    cells = []
+    for kind, body in split_cells(src_path.read_text()):
+        if kind == &quot;code&quot;:
+            cells.append(f&quot;\n{CELL_SEP}\n\n{body}\n{META_BLOCK}&quot;)
+    return header + &quot;\n&quot;.join(cells) + &quot;\n&quot;
+
+def render_platform(display_name: str) -&gt; str:
+    &quot;&quot;&quot;Produce .platform JSON with display name and logical ID.&quot;&quot;&quot;
+    return json.dumps({
+        &quot;$schema&quot;: &quot;https://developer.microsoft.com/json-schemas/fabric/gitIntegration/platformProperties/2.0.0/schema.json&quot;,
+        &quot;metadata&quot;: {&quot;type&quot;: &quot;Notebook&quot;, &quot;displayName&quot;: display_name},
+        &quot;config&quot;: {&quot;version&quot;: &quot;2.0&quot;, &quot;logicalId&quot;: str(uuid.uuid4())},
+    }, indent=2)
+
+def main():
+    for src_name, display in NOTEBOOKS:
+        nb_dir = Path(f&quot;fabric_notebooks/{display}.Notebook&quot;)
+        nb_dir.mkdir(parents=True, exist_ok=True)
+        (nb_dir / &quot;notebook-content.py&quot;).write_text(
+            render_notebook(Path(f&quot;notebooks/{src_name}&quot;), display))
+        (nb_dir / &quot;.platform&quot;).write_text(render_platform(display))
+        print(f&quot;wrote {nb_dir}&quot;)</code></pre>
+<p><strong>Output structure:</strong></p>
+<pre><code>fabric_notebooks/
+└── My Notebook 01.Notebook/
+    ├── .platform              # JSON: displayName, type, logicalId
+    └── notebook-content.py    # Fabric cell format with # CELL separators</code></pre>
+<p>The build script pre-configures lakehouse attachments (default +
+known) so notebooks auto-bind to the correct lakehouses on import — no
+manual UI step.</p>
+<h3 id="phase-3--deploy-to-fabric-workspace">Phase 3 — Deploy to Fabric
+workspace</h3>
+<pre class="bash"><code>fab import &quot;fabric_notebooks/My Notebook 01.Notebook&quot;</code></pre>
+<p>The <a
+href="https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-overview"><code>fab</code>
+CLI</a> uploads the notebook item to the target Fabric workspace.</p>
+<p><strong>References:</strong></p>
+<ul>
+<li><a
+href="https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-overview">Fabric
+CLI overview</a></li>
+<li><a
+href="https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-reference#import">Fabric
+CLI — import command</a></li>
+</ul>
+<h3 id="phase-4--run-the-notebook">Phase 4 — Run the notebook</h3>
+<p><strong>Standard run on HighConcurrency pool:</strong></p>
+<pre class="bash"><code>fab job start \
+  &quot;MyWorkspace.Workspace/My Notebook 01.Notebook&quot; \
+  -C &#39;{&quot;sparkPool&quot;:{&quot;type&quot;:&quot;HighConcurrency&quot;}}&#39; \
+  -P &quot;PARAM1:string=value1,PARAM2:int=42,PARAM3:bool=true&quot;</code></pre>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>-C '{"sparkPool":{"type":"HighConcurrency"}}'</code></td>
+<td>Reuse a warm Spark session across runs</td>
+</tr>
+<tr>
+<td><code>-P "KEY:type=value,..."</code></td>
+<td>Override parameter-cell variables (types: <code>string</code>,
+<code>int</code>, <code>float</code>, <code>bool</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>Returns a <code>jobInstanceId</code> immediately (asynchronous). The
+HighConcurrency pool reuses warm Spark sessions — first run incurs ~3
+min startup; subsequent runs within ~20 min start near-instantly.</p>
+<p><strong>Why <code>fab job start</code> and not Livy?</strong>
+Notebook jobs started via <code>fab job start</code> execute with
+<strong>full storage credentials</strong>, meaning they can write to
+lakehouse tables (Delta MERGE, INSERT, saveAsTable). Livy interactive
+sessions can read tables but <strong>cannot write</strong> — they lack
+the storage scope token.</p>
+<p><strong>Alternative — <code>nbmon submit</code></strong> wraps
+<code>fab job start</code> with HighConcurrency and auto-attaches to
+live-stream driver logs:</p>
+<pre class="bash"><code>nbmon submit &quot;MyWorkspace.Workspace/My Notebook 01.Notebook&quot;</code></pre>
+<p><strong>References:</strong></p>
+<ul>
+<li><a
+href="https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-reference#job">Fabric
+CLI — job start</a></li>
+<li><a
+href="https://learn.microsoft.com/fabric/data-engineering/high-concurrency-mode">HighConcurrency
+mode</a></li>
+</ul>
+<h3 id="phase-5--monitor-execution--detect-errors">Phase 5 — Monitor
+execution / detect errors</h3>
+<pre class="bash"><code>nbmon status &quot;MyWorkspace.Workspace/My Notebook 01.Notebook&quot; --run latest</code></pre>
+<p>Prints a compact 7-line rich banner (see <a
+href="#notebook-monitor-nbmon-internals">nbmon Internals</a> for how
+this works under the hood):</p>
+<pre><code>── Failed (21s) ── My Notebook 01
+livy=&lt;livy-guid&gt;  app=application_&lt;id&gt;
+error: (Cell In[17], line 5)
+  AnalysisException: [PATH_NOT_FOUND] Path does not exist: abfss://…/Files/config/file.csv
+spark_advise: Spark_User_SQL_PathDoesNotExist
+  Given file path does not exist in the user storage…</code></pre>
+<table>
+<thead>
+<tr>
+<th>Banner line</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>State (<code>Running</code> / <code>Succeeded</code> /
+<code>Failed</code>) + wall-clock duration</td>
+</tr>
+<tr>
+<td>2</td>
+<td>Notebook display name</td>
+</tr>
+<tr>
+<td>3</td>
+<td>Livy session ID + Spark application ID</td>
+</tr>
+<tr>
+<td>4</td>
+<td>Last cell stdout prints</td>
+</tr>
+<tr>
+<td>5–6</td>
+<td>Python traceback with <code>Cell In[N], line M</code> anchor +
+failing path</td>
+</tr>
+<tr>
+<td>7</td>
+<td>Spark Advise category</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Never use <code>fab job run-status</code></strong> for status
+checks — it only prints
+<code>"Job instance failed without detail error"</code> on failure.</p>
+</blockquote>
+<h3 id="phase-6--query-results-via-sql-analytics-endpoint">Phase 6 —
+Query results via SQL Analytics endpoint</h3>
+<p>Use the MCP tool to run read-only T-SQL against any lakehouse:</p>
+<pre class="sql"><code>-- Example: check output of a notebook run
+SELECT TOP 10 *
+FROM dbo.my_output_table
+WHERE column_a = &#39;filter_value&#39;
+ORDER BY column_b</code></pre>
+<p><strong>Capabilities:</strong></p>
+<ul>
+<li><strong>Zero cold-start</strong> (&lt; 1 s response vs Livy's 60–120
+s).</li>
+<li><strong>Bypasses the Livy write-scope limitation</strong> — SQL
+endpoint runs server-side inside Fabric and reads OneLake directly.</li>
+<li>Supports <code>INFORMATION_SCHEMA</code>, <code>sys.columns</code>,
+DMVs for schema exploration.</li>
+<li>200-row / ~16 KB cap per query.</li>
+<li>Discover available lakehouses via
+<code>list_lakehouses(workspace="…")</code>.</li>
+<li>Can query any lakehouse by display name (no GUIDs needed in the
+call).</li>
+</ul>
+<p><strong>References:</strong></p>
+<ul>
+<li><a
+href="https://learn.microsoft.com/fabric/data-engineering/lakehouse-sql-analytics-endpoint">Lakehouse
+SQL Analytics endpoint</a></li>
+<li><a
+href="https://learn.microsoft.com/fabric/data-warehouse/tsql-surface-area">T-SQL
+syntax for lakehouse</a></li>
+</ul>
+<h3 id="phase-7--feed-results-back--corrections-the-closed-loop">Phase 7
+— Feed results back → corrections (the closed loop)</h3>
+<ol type="1">
+<li>Agent reads the <code>nbmon</code> error banner (traceback + Spark
+Advise category).</li>
+<li>Agent queries transformed data via SQL endpoint to verify partial
+output or inspect schema.</li>
+<li>Agent edits the local <code>.py</code> source file to fix the
+issue.</li>
+<li><strong>Loop back to Phase 2</strong> (rebuild) → <strong>Phase
+3</strong> (redeploy) → <strong>Phase 4</strong> (rerun).</li>
+</ol>
+<p>The loop continues until <code>nbmon</code> reports
+<code>Succeeded</code> <strong>and</strong> the SQL endpoint query
+confirms correct output.</p>
+<h3 id="alternative-path--livy-interactive-statements">Alternative Path
+— Livy Interactive Statements</h3>
+<p>For multi-step Spark DataFrame debugging without a full notebook
+round-trip, use the <a
+href="https://learn.microsoft.com/fabric/data-engineering/lakehouse-notebook-livy-api">Livy
+API</a> to submit individual statements to a warm Spark session.</p>
+<blockquote>
+<p><strong>Important limitation:</strong> Livy sessions can
+<strong>read</strong> lakehouse tables but <strong>cannot write</strong>
+to them. Use Livy for interactive exploration and debugging; use
+<code>fab job start</code> for any code that needs to persist
+results.</p>
+</blockquote>
+<pre class="bash"><code># Create or reuse a HighConcurrency Livy session
+POST workspaces/&lt;workspace-guid&gt;/lakehouses/&lt;lakehouse-guid&gt;/livyapi/versions/2023-12-01/highConcurrencySessions
+Body: {&quot;sessionTag&quot;: &quot;my-session-tag&quot;}
+
+# Submit a statement
+POST …/highConcurrencySessions/&lt;session-id&gt;/repls/&lt;repl-id&gt;/statements
+Body: {&quot;code&quot;: &quot;df = spark.table(&#39;my_table&#39;); df.show()&quot;, &quot;kind&quot;: &quot;pyspark&quot;}
+
+# Poll for result
+GET …/highConcurrencySessions/&lt;session-id&gt;/repls/&lt;repl-id&gt;/statements/&lt;stmt-id&gt;</code></pre>
+<p>HC Livy packs multiple REPLs onto one underlying Spark session via a
+<code>sessionTag</code>. Only the first acquire pays cold-start;
+subsequent REPLs with the same tag join instantly.</p>
+<p><strong>References:</strong></p>
+<ul>
+<li><a
+href="https://learn.microsoft.com/fabric/data-engineering/lakehouse-notebook-livy-api">Livy
+API for Fabric</a></li>
+<li><a
+href="https://learn.microsoft.com/fabric/data-engineering/high-concurrency-livy">High
+concurrency Livy sessions</a></li>
+</ul>
+<hr />
+<h2 id="notebook-monitor-nbmon-internals">Notebook Monitor
+(<code>nbmon</code>) Internals</h2>
+<p><code>nbmon</code> is a custom Python CLI that bridges the gap
+between <code>fab job start</code> (which provides no error detail on
+failure) and the Fabric Spark Monitoring REST API (which has the actual
+driver logs).</p>
+<blockquote>
+<p><strong>Note:</strong> <code>nbmon</code> was built by an AI coding
+agent once the closed-loop process described in this document was
+finalised. The specification below — the Spark Monitoring REST API
+endpoints, the error extraction logic, the banner format — is the
+complete design. You can hand this write-up to your own coding agent and
+have it build an equivalent tool from scratch.</p>
+</blockquote>
+<h3 id="what-nbmon-does-internally">What <code>nbmon</code> does
+internally</h3>
+<pre><code>nbmon status &quot;MyWorkspace.Workspace/notebook.Notebook&quot; --run latest</code></pre>
+<p><strong>Step 1 — Resolve the notebook item ID.</strong> Calls
+<code>fab get "&lt;workspace-path&gt;" -q id</code> to translate the
+human-readable workspace path into a Fabric item UUID.</p>
+<p><strong>Step 2 — Acquire a bearer token.</strong> Reads
+<code>~/.config/fab/cache.bin</code> using Python's
+<code>msal.SerializableTokenCache</code>. Finds the access token scoped
+to <code>api.fabric.microsoft.com</code>. If the token is near expiry
+(&lt; 60 s), triggers a refresh via <code>fab auth status</code> and
+re-reads.</p>
+<p><strong>Step 3 — List recent runs.</strong> Calls the Spark
+Monitoring REST API:</p>
+<pre><code>GET https://api.fabric.microsoft.com/v1/workspaces/&lt;workspace-guid&gt;/notebooks/&lt;item-guid&gt;/livySessions</code></pre>
+<p>Returns a JSON array of all Livy sessions for this notebook, each
+with: <code>livyId</code>, <code>sparkApplicationId</code>,
+<code>jobInstanceId</code>, <code>state</code>,
+<code>submittedDateTime</code>, <code>startTimeUtc</code>,
+<code>endTimeUtc</code>.</p>
+<p><strong>Step 4 — Select the target run.</strong></p>
+<ul>
+<li><code>--run latest</code> → sort by <code>submittedDateTime</code>
+descending, pick <code>[0]</code>.</li>
+<li><code>--run livy:&lt;uuid&gt;</code> → filter by
+<code>livyId</code>.</li>
+<li><code>--run jobInstance:&lt;uuid&gt;</code> → filter by
+<code>jobInstanceId</code>.</li>
+</ul>
+<p><strong>Step 5 — Fetch driver stderr.</strong> Calls the log endpoint
+directly via <code>requests</code> (not <code>fab api</code>, which
+cannot return raw <code>text/plain</code> — it unconditionally
+<code>json.loads()</code> the response):</p>
+<pre><code>GET https://api.fabric.microsoft.com/v1/workspaces/&lt;workspace-guid&gt;/notebooks/&lt;item-guid&gt;/livySessions/&lt;livy-id&gt;/applications/&lt;app-id&gt;/logs
+    ?type=driver&amp;fileName=stderr&amp;isDownload=true
+Headers: Authorization: Bearer &lt;token&gt;</code></pre>
+<p>Returns the full driver stderr as <code>text/plain</code> (can be
+400–800 KB for a completed run).</p>
+<p><strong>Step 6 — Extract the error.</strong> Parses the stderr blob
+to find:</p>
+<ul>
+<li>The Python traceback (regex for <code>Cell In[N], line M</code>
+anchors).</li>
+<li>The Spark Advise category (regex for
+<code>_name -&gt; Spark_*</code> patterns — Fabric's error
+classification system).</li>
+<li>The last N lines of cell stdout output.</li>
+</ul>
+<p><strong>Step 7 — Render the banner.</strong> Formats the 7-line
+summary with colour codes (if TTY) and prints to stdout.</p>
+<h3 id="example-output-for-each-command">Example output for each
+command</h3>
+<p><strong><code>nbmon status</code> — Failed run (most common debugging
+case):</strong></p>
+<pre><code>── Failed (21s) ── My Transform Notebook
+livy=&lt;livy-guid&gt;  app=application_&lt;id&gt;  cell=17
+last output:
+  Processing batch XXXX... 847 rows
+error: (Cell In[17], line 5)
+  AnalysisException: [PATH_NOT_FOUND] Path does not exist: abfss://&lt;container&gt;@&lt;account&gt;.dfs.fabric.microsoft.com/Files/config/missing_file.csv
+spark_advise: Spark_User_SQL_PathDoesNotExist
+  Given file path does not exist in the user storage…</code></pre>
+<p><strong><code>nbmon status</code> — Succeeded run:</strong></p>
+<pre><code>── Succeeded (109s) ── My Transform Notebook
+livy=&lt;livy-guid&gt;  app=application_&lt;id&gt;  cell=24
+last output:
+  Wrote 12,847 rows to my_output_table
+  MERGE complete: 312 inserts, 48 updates, 0 deletes</code></pre>
+<p><strong><code>nbmon status</code> — Running (in-flight, no error
+yet):</strong></p>
+<pre><code>── Running (43s) ── My Transform Notebook
+livy=&lt;livy-guid&gt;  app=application_&lt;id&gt;  cell=9
+last output:
+  Loading dimension tables...
+  Joined 3 sources, 24,601 rows</code></pre>
+<p><strong><code>nbmon status</code> — Failed with no Python traceback
+(rare — OOM / driver kill):</strong></p>
+<pre><code>── Failed (312s) ── My Heavy Notebook
+livy=&lt;livy-guid&gt;  app=application_&lt;id&gt;
+(no python traceback in stdout — for full driver log: nbmon attach &lt;path&gt; --run livy:&lt;livy-guid&gt; --once)
+spark_advise: Spark_Internal_OutOfMemory
+  The Spark driver or executor ran out of memory…</code></pre>
+<p><strong><code>nbmon list</code> — Recent runs:</strong></p>
+<pre><code>  # │ State      │ Duration │ Livy ID        │ App ID                  │ Submitted
+────┼────────────┼──────────┼────────────────┼─────────────────────────┼──────────────────
+  1 │ Succeeded  │ 109s     │ &lt;livy-guid-1&gt;  │ application_&lt;id_1&gt;      │ 2026-04-30 14:22
+  2 │ Failed     │ 21s      │ &lt;livy-guid-2&gt;  │ application_&lt;id_2&gt;      │ 2026-04-30 14:18
+  3 │ Succeeded  │ 94s      │ &lt;livy-guid-3&gt;  │ application_&lt;id_3&gt;      │ 2026-04-30 13:55</code></pre>
+<p><strong><code>nbmon submit</code> — Live-streamed output
+(abbreviated):</strong></p>
+<pre><code>[submit] fab job start &quot;MyWorkspace.Workspace/My Notebook.Notebook&quot; -C HighConcurrency
+[submit] jobInstanceId: &lt;job-guid&gt;
+[submit] Waiting for Spark session...
+[OUT] Spark session available as &#39;spark&#39;.
+[OUT] Loading config from abfss://...
+[OUT] Processing batch XXXX... 847 rows
+[ERR] 26/04/30 14:22:31 WARN TaskSetManager: Lost task 0.0 in stage 12.0
+[OUT] Wrote 12,847 rows to my_output_table
+── Succeeded (109s) ── My Notebook</code></pre>
+<h3 id="why-not-just-use-fab-job-run-status">Why not just use
+<code>fab job run-status</code>?</h3>
+<p><code>fab job run-status</code> wraps the Fabric Jobs REST API, which
+only returns a high-level status envelope. On failure it prints:</p>
+<pre><code>failureReason: {&quot;errorCode&quot;:&quot;JobInstanceStatusFailed&quot;,&quot;message&quot;:&quot;Job instance failed without detail error&quot;}</code></pre>
+<p>No traceback, no cell reference, no Spark error category. This is
+useless for debugging. The Spark Monitoring API (what <code>nbmon</code>
+uses) has the actual driver logs — the same logs you'd see in the Fabric
+portal's Monitor Hub.</p>
+<h3 id="spark-monitoring-rest-api-surface-used-by-nbmon">Spark
+Monitoring REST API surface used by <code>nbmon</code></h3>
+<p>All endpoints are under
+<code>https://api.fabric.microsoft.com/v1/</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Purpose</th>
+<th>Method</th>
+<th>Path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>List runs</td>
+<td>GET</td>
+<td><code>workspaces/&lt;ws&gt;/notebooks/&lt;item&gt;/livySessions</code></td>
+</tr>
+<tr>
+<td>Run detail</td>
+<td>GET</td>
+<td><code>workspaces/&lt;ws&gt;/notebooks/&lt;item&gt;/livySessions/&lt;livy-id&gt;</code></td>
+</tr>
+<tr>
+<td>Log metadata</td>
+<td>GET</td>
+<td><code>…/livySessions/&lt;livy-id&gt;/applications/&lt;app-id&gt;/logs?type=driver&amp;meta=true&amp;fileName=stderr</code></td>
+</tr>
+<tr>
+<td>Log content</td>
+<td>GET</td>
+<td><code>…/livySessions/&lt;livy-id&gt;/applications/&lt;app-id&gt;/logs?type=driver&amp;fileName=stderr&amp;isDownload=true</code></td>
+</tr>
+<tr>
+<td>Byte-range read</td>
+<td>GET</td>
+<td><code>…&amp;isPartial=true&amp;offset=&lt;N&gt;&amp;size=&lt;M&gt;</code>
+(appended to log content URL)</td>
+</tr>
+</tbody>
+</table>
+<p>Required token scope: <code>Notebook.Read.All</code> (included in the
+standard <code>fab auth login</code> token).</p>
+<p><strong>References:</strong></p>
+<ul>
+<li><a
+href="https://learn.microsoft.com/fabric/data-engineering/spark-monitoring-api-overview">Spark
+monitoring API overview</a></li>
+<li><a
+href="https://learn.microsoft.com/rest/api/fabric/notebook/livy-sessions/get-livy-session">Notebook
+Livy sessions REST API</a></li>
+</ul>
+<h3 id="nbmon-commands"><code>nbmon</code> commands</h3>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>nbmon status &lt;path&gt; [--run latest]</code></td>
+<td>Print the 7-line error/status banner</td>
+</tr>
+<tr>
+<td><code>nbmon list &lt;path&gt; [--limit N]</code></td>
+<td>List recent runs with state + livy + app IDs</td>
+</tr>
+<tr>
+<td><code>nbmon attach &lt;path&gt; [--run …] [--once]</code></td>
+<td>Full driver log dump (800 KB+, for terminal use)</td>
+</tr>
+<tr>
+<td><code>nbmon submit &lt;path&gt;</code></td>
+<td><code>fab job start -C HC</code> + live-stream driver log</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="gotchas--lessons-learned">Gotchas &amp; Lessons Learned</h2>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Gotcha</th>
+<th>Detail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><strong><code>fab import</code> strips <code>tags</code>
+metadata</strong></td>
+<td><code>fab import --format .py</code> silently removes
+<code>"tags"</code> from cell metadata, breaking parameter cells
+(<code>tags=["parameters"]</code>). <strong>Workarounds:</strong>
+designate the parameter cell in the Fabric UI first, use git
+integration, or use a direct REST PUT of the notebook definition.</td>
+</tr>
+<tr>
+<td>2</td>
+<td><strong>Never use <code>fab job run-status</code> for
+debugging</strong></td>
+<td>It only prints
+<code>"Job instance failed without detail error"</code> on failure.
+Always use <code>nbmon</code> instead — it surfaces the actual Python
+traceback and Spark Advise error category from the driver logs.</td>
+</tr>
+<tr>
+<td>3</td>
+<td><strong>Livy can read but cannot write</strong></td>
+<td>Livy interactive sessions can read lakehouse tables but cannot write
+(MERGE, INSERT, saveAsTable). Any notebook that writes to a lakehouse
+must run via <code>fab job start</code>, which executes with full
+storage credentials.</td>
+</tr>
+<tr>
+<td>4</td>
+<td><strong>HighConcurrency cold start</strong></td>
+<td>First run on an HC pool takes ~3 min for Spark session creation.
+Subsequent runs within ~20 min of idle are near-instant. Plan iteration
+speed accordingly.</td>
+</tr>
+<tr>
+<td>5</td>
+<td><strong>Driver log size</strong></td>
+<td>Full <code>stderr</code> logs can be ~800 KB. Never pipe them into
+an agent's conversation context. Use <code>nbmon attach … --once</code>
+from a real terminal for full inspection. The 7-line
+<code>nbmon status</code> banner is sufficient for ~95% of
+failures.</td>
+</tr>
+<tr>
+<td>6</td>
+<td><strong>SQL endpoint row cap</strong></td>
+<td>The SQL Analytics endpoint returns at most 200 rows / ~16 KB per
+query. Use <code>TOP N</code>, <code>WHERE</code>, or aggregations to
+stay within limits.</td>
+</tr>
+<tr>
+<td>7</td>
+<td><strong>Shared MSAL token cache</strong></td>
+<td>All tools (<code>fab</code>, <code>nbmon</code>, Livy) read from the
+same MSAL cache. If one tool gets a 401, run
+<code>fab auth status</code> to refresh — all tools benefit
+immediately.</td>
+</tr>
+<tr>
+<td>8</td>
+<td><strong><code>fab api</code> cannot return raw text</strong></td>
+<td><code>fab api</code> unconditionally <code>json.loads()</code> every
+response. Endpoints that return <code>text/plain</code> (like driver
+logs) fail with <code>Expecting value: line 1 column 1</code>. This is
+why <code>nbmon</code> uses <code>requests</code> directly with the
+extracted bearer token instead of <code>fab api</code>.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="quick-reference-tables">Quick-Reference Tables</h2>
+<h3 id="tools-and-endpoints">Tools and endpoints</h3>
+<table>
+<thead>
+<tr>
+<th>Tool / Endpoint</th>
+<th>Purpose</th>
+<th>Example invocation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>fab</code> CLI</td>
+<td>Import notebooks, start jobs, auth</td>
+<td><code>fab import "notebook.Notebook"</code></td>
+</tr>
+<tr>
+<td><code>fab job start</code></td>
+<td>Run notebook with write access</td>
+<td><code>fab job start "path.Notebook" -C '{"sparkPool":{"type":"HighConcurrency"}}'</code></td>
+</tr>
+<tr>
+<td><code>fab auth login</code></td>
+<td>Provision MSAL tokens</td>
+<td><code>fab auth login</code></td>
+</tr>
+<tr>
+<td><code>nbmon status</code></td>
+<td>Monitor run status + errors</td>
+<td><code>nbmon status "path.Notebook" --run latest</code></td>
+</tr>
+<tr>
+<td><code>nbmon submit</code></td>
+<td>Run + monitor in one command</td>
+<td><code>nbmon submit "path.Notebook"</code></td>
+</tr>
+<tr>
+<td><code>nbmon list</code></td>
+<td>List recent runs</td>
+<td><code>nbmon list "path.Notebook" --limit 10</code></td>
+</tr>
+<tr>
+<td>SQL endpoint (MCP)</td>
+<td>T-SQL queries against lakehouses</td>
+<td><code>run_sql(sql="SELECT …", lakehouse="MyLakehouse")</code></td>
+</tr>
+<tr>
+<td>SQL endpoint (MCP)</td>
+<td>Discover lakehouses</td>
+<td><code>list_lakehouses(workspace="My Workspace")</code></td>
+</tr>
+<tr>
+<td>Livy HC sessions</td>
+<td>Interactive Spark statements (read-only)</td>
+<td><code>POST …/highConcurrencySessions</code> + statements</td>
+</tr>
+<tr>
+<td><code>build_fabric_notebooks.py</code></td>
+<td>Convert <code>.py</code> → <code>.Notebook</code></td>
+<td><code>python bin/build_fabric_notebooks.py</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="fabric-rest-api-endpoints-used">Fabric REST API endpoints
+used</h3>
+<table>
+<thead>
+<tr>
+<th>Purpose</th>
+<th>Method</th>
+<th>Endpoint path</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Upload notebook</td>
+<td>POST</td>
+<td><code>workspaces/&lt;ws&gt;/items</code> (via
+<code>fab import</code>)</td>
+</tr>
+<tr>
+<td>Start notebook job</td>
+<td>POST</td>
+<td><code>workspaces/&lt;ws&gt;/items/&lt;item&gt;/jobs/instances</code>
+(via <code>fab job start</code>)</td>
+</tr>
+<tr>
+<td>List Livy sessions</td>
+<td>GET</td>
+<td><code>workspaces/&lt;ws&gt;/notebooks/&lt;item&gt;/livySessions</code></td>
+</tr>
+<tr>
+<td>Get Livy session</td>
+<td>GET</td>
+<td><code>workspaces/&lt;ws&gt;/notebooks/&lt;item&gt;/livySessions/&lt;livy-id&gt;</code></td>
+</tr>
+<tr>
+<td>Get driver log</td>
+<td>GET</td>
+<td><code>…/livySessions/&lt;livy-id&gt;/applications/&lt;app-id&gt;/logs?type=driver&amp;fileName=stderr&amp;isDownload=true</code></td>
+</tr>
+<tr>
+<td>Create HC Livy session</td>
+<td>POST</td>
+<td><code>workspaces/&lt;ws&gt;/lakehouses/&lt;lh&gt;/livyapi/versions/2023-12-01/highConcurrencySessions</code></td>
+</tr>
+<tr>
+<td>Submit Livy statement</td>
+<td>POST</td>
+<td><code>…/highConcurrencySessions/&lt;session-id&gt;/repls/&lt;repl-id&gt;/statements</code></td>
+</tr>
+<tr>
+<td>SQL Analytics endpoint</td>
+<td>TDS</td>
+<td><code>&lt;lakehouse-sql-endpoint-host&gt;:1433</code> (via
+<code>pymssql</code> / <code>pyodbc</code>)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="external-references">External references</h3>
+<table>
+<thead>
+<tr>
+<th>Topic</th>
+<th>URL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fabric CLI overview</td>
+<td><a
+href="https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-overview">https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-overview</a></td>
+</tr>
+<tr>
+<td>Fabric CLI reference</td>
+<td><a
+href="https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-reference">https://learn.microsoft.com/fabric/developer/command-line-tool/fabric-cli-reference</a></td>
+</tr>
+<tr>
+<td>HighConcurrency mode</td>
+<td><a
+href="https://learn.microsoft.com/fabric/data-engineering/high-concurrency-mode">https://learn.microsoft.com/fabric/data-engineering/high-concurrency-mode</a></td>
+</tr>
+<tr>
+<td>Livy API for Fabric</td>
+<td><a
+href="https://learn.microsoft.com/fabric/data-engineering/lakehouse-notebook-livy-api">https://learn.microsoft.com/fabric/data-engineering/lakehouse-notebook-livy-api</a></td>
+</tr>
+<tr>
+<td>HC Livy sessions</td>
+<td><a
+href="https://learn.microsoft.com/fabric/data-engineering/high-concurrency-livy">https://learn.microsoft.com/fabric/data-engineering/high-concurrency-livy</a></td>
+</tr>
+<tr>
+<td>Spark Monitoring API</td>
+<td><a
+href="https://learn.microsoft.com/fabric/data-engineering/spark-monitoring-api-overview">https://learn.microsoft.com/fabric/data-engineering/spark-monitoring-api-overview</a></td>
+</tr>
+<tr>
+<td>Lakehouse SQL endpoint</td>
+<td><a
+href="https://learn.microsoft.com/fabric/data-engineering/lakehouse-sql-analytics-endpoint">https://learn.microsoft.com/fabric/data-engineering/lakehouse-sql-analytics-endpoint</a></td>
+</tr>
+<tr>
+<td>Fabric REST API auth</td>
+<td><a
+href="https://learn.microsoft.com/rest/api/fabric/articles/get-started/fabric-api-quickstart">https://learn.microsoft.com/rest/api/fabric/articles/get-started/fabric-api-quickstart</a></td>
+</tr>
+<tr>
+<td>MSAL Python docs</td>
+<td><a
+href="https://learn.microsoft.com/entra/msal/python/getting-started/device-code-flow">https://learn.microsoft.com/entra/msal/python/getting-started/device-code-flow</a></td>
+</tr>
+<tr>
+<td>Notebook Livy REST spec</td>
+<td><a
+href="https://learn.microsoft.com/rest/api/fabric/notebook/livy-sessions/get-livy-session">https://learn.microsoft.com/rest/api/fabric/notebook/livy-sessions/get-livy-session</a></td>
+</tr>
+</tbody>
+</table>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    fontFamily: 'Georgia, serif',
+    themeVariables: {
+      primaryColor: '#B0BEC5',
+      primaryTextColor: '#121212',
+      primaryBorderColor: '#455A64',
+      lineColor: '#455A64',
+      secondaryColor: '#ECEFF1',
+      secondaryBorderColor: '#455A64',
+      tertiaryColor: '#FFFFFF',
+      tertiaryBorderColor: '#455A64',
+    }
+  });
+</script>
+</body>
+</html>
