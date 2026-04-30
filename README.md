@@ -1,60 +1,46 @@
-# Fabric Notebook Closed-Loop Development
+# SupplyChainProjects AI Usecase
 
-An end-to-end process for authoring, deploying, running, monitoring, and
-correcting PySpark notebooks on Microsoft Fabric — driven entirely from a
-headless agent environment with no portal interaction required.
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support-orange?style=for-the-badge&logo=buy-me-a-coffee&logoColor=white)](https://buymeacoffee.com/goreavin)
 
-## Documentation
+This GitLab project hosts work tied to the Supply Chain AI use-case.
 
-- **[Full Process Guide](docs/process.md)** — comprehensive walkthrough with
-  Mermaid diagrams, phase-by-phase detail, tool decision matrix, and gotchas.
-- **[HTML Version](docs/index.html)** — single-page wiki-style rendering of
-  the process guide.
+## Layout
 
-## nbmon — Fabric Notebook Monitor
-
-`nbmon` is a Python CLI that bridges the gap between `fab job start` (which
-provides no error detail on failure) and the Fabric Spark Monitoring REST API
-(which has the actual driver logs with Python tracebacks and Spark Advise
-categories).
-
-### Installation
-
-```bash
-pip install msal requests
+```
+.
+└── Fabric/               # Ported Microsoft Fabric workspace for running on AWS SageMaker
+    ├── .sagemaker/       # SageMaker bootstrap scripts (unpack, install-deps)
+    ├── .tools/claude-home/  # Claude Code config (skills, settings, memories)
+    ├── CLAUDE.md         # Claude Code project instructions
+    └── ...               # notebooks, drawio diagrams, work artefacts
 ```
 
-### Quick Start
+## Quick start on a SageMaker space
 
 ```bash
-# Add nbmon to your PATH
-export PATH="$PWD/nbmon/bin:$PATH"
+# 1. Clone this repo (the Fabric content lives under ./Fabric)
+git clone https://gitlab.com/cslagile/workloads/ai-automation/supplychainprojects/supplychainprojects-ai-usecase.git ~/scp-ai
 
-# Check recent runs
-nbmon list "MyWorkspace.Workspace/My Notebook.Notebook"
+# 2. Bootstrap Claude Code config (symlinks ~/.claude -> Fabric/.tools/claude-home)
+cd ~/scp-ai/Fabric
+bash .sagemaker/unpack.sh
 
-# Get status + error banner for the latest run
-nbmon status "MyWorkspace.Workspace/My Notebook.Notebook"
+# 3. (optional) Install Python deps for tools that need them
+bash .sagemaker/install-deps.sh core       # pyarrow + pandas
+# bash .sagemaker/install-deps.sh sql      # Fabric Lakehouse SQL client
+# bash .sagemaker/install-deps.sh fabric   # Microsoft Fabric CLI
+# bash .sagemaker/install-deps.sh mcp      # Model Context Protocol deps
+# bash .sagemaker/install-deps.sh all
 
-# Submit and live-stream driver logs
-nbmon submit "MyWorkspace.Workspace/My Notebook.Notebook"
-
-# Attach to an in-flight or completed run
-nbmon attach "MyWorkspace.Workspace/My Notebook.Notebook" --run latest
+# 4. First-time Claude login, then start a session
+claude login
+claude
 ```
 
-### Prerequisites
+See `Fabric/.sagemaker/README.md` for deeper detail on what the unpack script does and what was intentionally left out of the port.
 
-- Python 3.10+
-- `msal` and `requests` packages
-- Fabric CLI (`fab`) authenticated via `fab auth login`
+## Support
 
-### Architecture
+If you find this project useful, consider buying me a coffee! ☕
 
-See [nbmon Internals](docs/process.md#notebook-monitor-nbmon-internals) in the
-process guide for a detailed walkthrough of what each command does under the
-hood, including the Spark Monitoring REST API endpoints used.
-
-## License
-
-MIT
+<a href="https://buymeacoffee.com/goreavin" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
